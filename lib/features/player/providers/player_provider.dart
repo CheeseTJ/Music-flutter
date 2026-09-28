@@ -106,19 +106,6 @@ class PlayerController extends StateNotifier<PlayerState> {
   /// 写入用 ??=：连点两首时，只有第一次（真正在放的那首）才值得还原。
   _PrePlaySnapshot? _prePlay;
 
-  // ── 下一首预加载 ──
-  //
-  // 快播完时提前把「下一首」的签名 URL 换好、歌词落缓存，切歌时直接用，
-  // 省掉现场取链的一次 D1 往返。随机模式的处理：预加载触发时就掷好骰子
-  // 并记进 [_preloadedIndex]，切歌时 [_pickNextIndex] 直接采用同一个结果
-  // —— 决策提前而不是播完才随机，预取的 URL 才能对上真正切的那首。
-  LocalSong? _preloadedNext;
-  String? _preloadedUrl;
-  int? _preloadedIndex;
-  bool _preloadInFlight = false;
-  DateTime? _preloadBlockedUntil;
-  static const _preloadLeadTime = Duration(seconds: 30);
-
   /// [seq] 是否仍是最新一次播放请求。
   bool isCurrentLoad(int seq) => seq == _loadSeq;
 
@@ -182,8 +169,6 @@ class PlayerController extends StateNotifier<PlayerState> {
   bool get lyricFailed => state.lyricFailed;
   void setPlaylist(List<LocalSong> songs) {
     _playlist = songs;
-    // 列表可能被重排/替换，预取的 index 语义失效，清掉重取
-    _clearPreload();
     // 修正 _currentIndex，解决冷启动恢复时 setPlaylist 晚于 load 导致的索引错位
     if (_currentSong != null) {
       final idx = _playlist.indexWhere((s) => s.id == _currentSong!.id);
@@ -253,16 +238,7 @@ class PlayerController extends StateNotifier<PlayerState> {
     // return，若 _fetchLyric 只挂在末尾就不会被触发，歌词会一直停在 loading。
     _fetchLyric(song.id, seq);
 
-    // 命中预取的签名 URL 就直接用（快播完时已提前换好），否则现场取链。
-    // 消费即清：避免把一个六小时后过期的链接一直揣着。id 兜底校验保证
-    // index 与 URL 的对应关系即便在列表被替换后也不会张冠李戴。
-    Map<String, dynamic>? preloaded;
-    if (_preloadedUrl != null && _preloadedNext?.id == song.id) {
-      preloaded = {'url': _preloadedUrl};
-      _clearPreload();
-      debugPrint('[preload] hit: ${song.title}');
-    }
-    final data = preloaded ?? await _apiClient.getPlayUrl(song.id);
+    final data = await _apiClient.getPlayUrl(song.id);
     if (!isCurrentLoad(seq)) return;
     final url = data['url'] as String;
 
@@ -317,7 +293,6 @@ class PlayerController extends StateNotifier<PlayerState> {
         _currentLyricIndex = idx;
       }
     }
-    _maybePreloadNext(position);
   }
 
   Future<void> _fetchLyric(int songId, int seq) async {
@@ -405,84 +380,6 @@ class PlayerController extends StateNotifier<PlayerState> {
     return idx;
   }
 
-  /// 决策下一首的 index，next() 与预加载共用同一套决策。
-  ///
-  /// 随机模式优先复用已预取掷好的 [_preloadedIndex]：预加载触发时就把骰子
-  /// 掷好，切歌时用同一个结果，否则预取的 URL 会对不上另一首。就算预取
-  /// 后来失效被跳过，消费端的 id 校验也会兜底走现场取链，不会放错歌。
-  int? _pickNextIndex() {
-    if (_playlist.isEmpty) return null;
-    if (state.playMode == 2) {
-      if (_playlist.length == 1) return 0;
-      return (_preloadedIndex != null && _preloadedUrl != null)
-          ? _preloadedIndex
-          : _randomIndex();
-    }
-    if (_currentIndex < _playlist.length - 1) return _currentIndex + 1;
-    if (state.playMode == 0) return 0;
-    return null; // 播到列表末尾且不循环
-  }
-
-  /// 快播完时预取下一首：签名 URL 换好、歌词落到本地缓存。
-  ///
-  /// 触发条件：剩余时间不足 [_preloadLeadTime]。每次切歌后 [_preloadedIndex]
-  /// 会被消费或因 index 不匹配而重新预取；预取失败退避一分钟，避免每秒重试。
-  void _maybePreloadNext(Duration position) {
-    if (state.playMode == 1) return; // 单曲循环没有下一首
-    if (_playlist.isEmpty || _preloadInFlight) return;
-    if (_preloadBlockedUntil != null &&
-        DateTime.now().isBefore(_preloadBlockedUntil!)) {
-      return;
-    }
-    final dur = _handler.duration;
-    if (dur == null || dur <= Duration.zero) return;
-    if (dur - position > _preloadLeadTime) return;
-
-    final nextIdx = _pickNextIndex();
-    if (nextIdx == null) return;
-    if (_preloadedUrl != null && _preloadedIndex == nextIdx) return; // 已就绪
-
-    _preloadNext(nextIdx);
-  }
-
-  Future<void> _preloadNext(int index) async {
-    final song = _playlist[index];
-    _preloadInFlight = true;
-    try {
-      // 歌词先落本地缓存，切歌时 _fetchLyric 直接命中文件缓存，不再走网络
-      unawaited(_preloadLyric(song.id));
-      final data = await _apiClient.getPlayUrl(song.id);
-      final url = data['url'] as String?;
-      if (url == null || url.isEmpty) return;
-      _preloadedIndex = index;
-      _preloadedNext = song;
-      _preloadedUrl = url;
-      debugPrint('[preload] next: ${song.title} (idx=$index)');
-    } catch (e) {
-      debugPrint('[preload] failed: $e');
-      _preloadBlockedUntil =
-          DateTime.now().add(const Duration(seconds: 60));
-    } finally {
-      _preloadInFlight = false;
-    }
-  }
-
-  /// 把歌词提前拉进缓存（已有缓存则跳过），不影响任何播放状态。
-  Future<void> _preloadLyric(int songId) async {
-    try {
-      await _ensureLyricCacheDir();
-      if (await _readLyricCache(songId) != null) return;
-      final lrcText = await _apiClient.getLyric(songId);
-      if (lrcText.isNotEmpty) await _writeLyricCache(songId, lrcText);
-    } catch (_) {}
-  }
-
-  void _clearPreload() {
-    _preloadedNext = null;
-    _preloadedUrl = null;
-    _preloadedIndex = null;
-  }
-
   /// 跳到下一首。
   ///
   /// [forced] = 用户主动触发（点按钮、按通知栏的下一首）。加载期间 phase 是
@@ -497,14 +394,26 @@ class PlayerController extends StateNotifier<PlayerState> {
     try {
       await _handler.stop();
       state = state.copyWith(phase: PlayerPhase.paused);
-      final nextIdx = _pickNextIndex();
-      if (nextIdx == null) {
-        debugPrint('[next] end, no loop');
+      if (state.playMode == 2) {
+        if (_playlist.length == 1) {
+          await play(_playlist[0]);
+          return;
+        }
+        _currentIndex = _randomIndex();
+        await play(_playlist[_currentIndex]);
         return;
       }
-      _currentIndex = nextIdx;
-      debugPrint('[next] -> idx=$_currentIndex');
-      await play(_playlist[_currentIndex]);
+      if (_currentIndex < _playlist.length - 1) {
+        _currentIndex++;
+        debugPrint('[next] -> idx=$_currentIndex');
+        await play(_playlist[_currentIndex]);
+      } else if (state.playMode == 0) {
+        _currentIndex = 0;
+        debugPrint('[next] loop -> idx=$_currentIndex');
+        await play(_playlist[_currentIndex]);
+      } else {
+        debugPrint('[next] end, no loop');
+      }
     } finally {
       _skipping--;
     }
@@ -563,8 +472,6 @@ class PlayerController extends StateNotifier<PlayerState> {
     // 维护单曲 playlist，使 next/previous 可用
     _playlist = [_currentSong!];
     _currentIndex = 0;
-    // 列表被换成单曲，预取的 index 语义失效
-    _clearPreload();
     state = state.copyWith(
       phase: PlayerPhase.loading,
       lyricLoading: false,
