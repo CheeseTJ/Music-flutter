@@ -18,8 +18,8 @@ Android 端的个人云音乐播放器。**它本身不存储曲库**，而是�
 
 | 链路 | 后端 | 做什么 |
 |---|---|---|
-| **在线找歌** | [music-api](https://github.com/CheeseTJ/music-api) | 聚合多音源的搜索 / 播放直链 / 歌词 |
-| **我的音乐** | [music-worker](https://github.com/CheeseTJ/music-worker) | 个人曲库：上传 / 列表 / 播放 / 删除 |
+| **在线找歌** | [Music-api](https://github.com/CheeseTJ/Music-api) | 聚合多音源的搜索 / 播放直链 / 歌词 |
+| **我的音乐** | [Music-worker](https://github.com/CheeseTJ/Music-worker) | 个人曲库：上传 / 列表 / 播放 / 删除 |
 
 两者职责完全分离：在线搜索负责"找到并导入"，个人曲库负责"长期保存和播放"。导入后音频文件存在 Cloudflare R2 上，元数据存在 D1 里，本机只保留缓存。
 
@@ -120,8 +120,8 @@ lib/
 
 | 仓库 | 说明 |
 |---|---|
-| [music-api](https://github.com/CheeseTJ/music-api) | 多音源聚合 API（搜索 / 直链 / 歌词 / 下载） |
-| [music-worker](https://github.com/CheeseTJ/music-worker) | 个人曲库后端（Cloudflare Workers + R2 + D1） |
+| [Music-api](https://github.com/CheeseTJ/Music-api) | 多音源聚合 API（搜索 / 直链 / 歌词 / 下载） |
+| [Music-worker](https://github.com/CheeseTJ/Music-worker) | 个人曲库后端（Cloudflare Workers + R2 + D1） |
 
 ## 已知约束
 
